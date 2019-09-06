@@ -18,6 +18,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import six
+import subprocess
+import tempfile
 
 from ipalib.frontend import Command, Object
 from ipalib import api, errors
@@ -32,7 +34,7 @@ from .baseldap import LDAPObject, LDAPCreate, LDAPDelete,\
 from ipalib.request import context
 from .service import normalize_principal, validate_realm
 from ipalib import _, ngettext
-from ipapython import kerberos
+from ipapython import kerberos, certdb
 from ipapython.dn import DN
 from ipaserver.masters import is_service_enabled
 
@@ -999,9 +1001,30 @@ class vaultconfig_show(Retrieve):
             raise errors.InvocationError(
                 format=_('KRA service is not enabled'))
 
-        with self.api.Backend.kra.get_client() as kra_client:
-            transport_cert = kra_client.system_certs.get_transport_cert()
-            config = {'transport_cert': transport_cert.binary}
+        tempdb = certdb.NSSDatabase()
+        tempdb.create_db()
+
+        try:
+            with tempfile.NamedTemporaryFile() as out_file:
+                # retrieve transport cert and store it into a file
+                cmd = [
+                    'pki',
+                    '-d', tempdb.secdir,
+                    '-C', tempdb.pwd_file,
+                    '--ignore-cert-status', 'UNTRUSTED_ISSUER',
+                    'kra-cert-transport-export',
+                    '--output-format', 'der',
+                    '--output-file', out_file.name,
+                ]
+                subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+
+                # load transport cert from file
+                with open(out_file.name, 'rb') as in_file:
+                    transport_cert = in_file.read()
+        finally:
+            tempdb.close()
+
+        config = {'transport_cert': transport_cert}
 
         self.api.Object.config.show_servroles_attributes(
             config, "KRA server", **options)
