@@ -1134,34 +1134,130 @@ class vault_archive_internal(PKQuery):
         # retrieve vault info
         vault = self.api.Command.vault_show(*args, **options)['result']
 
-        # connect to KRA
-        with self.api.Backend.kra.get_client() as kra_client:
-            kra_account = pki.account.AccountClient(kra_client.connection)
-            kra_account.login()
+        client_key_id = self.obj.get_key_id(vault['dn'])
 
-            client_key_id = self.obj.get_key_id(vault['dn'])
+        tempdb = certdb.NSSDatabase()
+        tempdb.create_db()
 
-            # deactivate existing vault record in KRA
-            response = kra_client.keys.list_keys(
-                client_key_id,
-                pki.key.KeyClient.KEY_STATUS_ACTIVE)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            ra_agent_p12 = os.path.join(tmpdir, 'ra-agent.p12')
+            request_json = os.path.join(tmpdir, 'request.json')
 
-            for key_info in response.key_infos:
-                kra_client.keys.modify_key_status(
-                    key_info.get_key_id(),
-                    pki.key.KeyClient.KEY_STATUS_INACTIVE)
+            # import RA cert and key into PKCS #12 file
+            cmd = [
+                'openssl',
+                'pkcs12',
+                '-export',
+                '-in', paths.RA_AGENT_PEM,
+                '-inkey', paths.RA_AGENT_KEY,
+                '-out', ra_agent_p12,
+                '-name', 'ra-agent',
+                '-passout', 'file:' + tempdb.pwd_file
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            subprocess.run(cmd, check=True)
 
-            # forward wrapped data to KRA
-            kra_client.keys.archive_encrypted_data(
-                client_key_id,
-                pki.key.KeyClient.PASS_PHRASE_TYPE,
-                wrapped_vault_data,
-                wrapped_session_key,
-                algorithm_oid=DES_EDE3_CBC_OID,
-                nonce_iv=nonce,
-            )
+            # import PKCS #12 file into NSS database
+            cmd = [
+                'pki',
+                '-d', tempdb.secdir,
+                '-C', tempdb.pwd_file,
+                'pkcs12-import',
+                '--pkcs12-file', ra_agent_p12,
+                '--pkcs12-password-file', tempdb.pwd_file
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            subprocess.run(cmd, check=True)
 
-            kra_account.logout()
+            # find active keys by client key ID
+            cmd = [
+                'pki',
+                '-d', tempdb.secdir,
+                '-C', tempdb.pwd_file,
+                '-n', 'ra-agent',
+                '--ignore-cert-status', 'UNTRUSTED_ISSUER',
+                'kra-key-find',
+                '--clientKeyID', client_key_id,
+                '--status', 'active',
+                '--output-format', 'json'
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+            key_infos = json.loads(result.stdout.decode('utf-8'))
+
+            for key_info in key_infos['entries']:
+                key_url = key_info['keyURL']
+                p = key_url.rfind('/') + 1
+                key_id = key_url[p:]
+
+                # deactivate vault record in KRA
+                cmd = [
+                    'pki',
+                    '-d', tempdb.secdir,
+                    '-C', tempdb.pwd_file,
+                    '-n', 'ra-agent',
+                    '--ignore-cert-status', 'UNTRUSTED_ISSUER',
+                    'kra-key-mod', key_id,
+                    '--status', 'inactive'
+                ]
+                print('Command: %s' % ' '.join(cmd))
+                subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+
+            # create archival request
+            request = {
+                'Attributes': {
+                    'Attribute': [
+                        {
+                            'name': 'clientKeyID',
+                            'value': client_key_id
+                        },
+                        {
+                            'name': 'dataType',
+                            'value': 'passPhrase'
+                        },
+                        {
+                            'name': 'algorithmOID',
+                            'value': DES_EDE3_CBC_OID
+                        },
+                        {
+                            'name': 'wrappedPrivateData',
+                            'value': base64.b64encode(wrapped_vault_data).decode('utf-8')
+                        },
+                        {
+                            'name': 'transWrappedSessionKey',
+                            'value': base64.b64encode(wrapped_session_key).decode('utf-8')
+                        },
+                        {
+                            'name': 'symmetricAlgorithmParams',
+                            'value': base64.b64encode(nonce).decode('utf-8')
+                        }
+                    ]
+                },
+                'ClassName': 'com.netscape.certsrv.key.KeyArchivalRequest'
+            }
+
+            with open(request_json, 'w') as f:
+                json.dump(request, f)
+
+            # submit archival request
+            cmd = [
+                'pki',
+                '-d', tempdb.secdir,
+                '-C', tempdb.pwd_file,
+                '-n', 'ra-agent',
+                '--ignore-cert-status', 'UNTRUSTED_ISSUER',
+                'kra-key-archive',
+                '--clientKeyID', client_key_id,
+                '--input-format', 'json',
+                '--input', request_json,
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            subprocess.run(cmd, check=True)
+
+        finally:
+            shutil.rmtree(tmpdir)
+            tempdb.close()
 
         response = {
             'value': args[-1],
