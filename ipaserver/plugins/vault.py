@@ -17,6 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import base64
 import json
 import os
 import shutil
@@ -1200,37 +1201,129 @@ class vault_retrieve_internal(PKQuery):
         # retrieve vault info
         vault = self.api.Command.vault_show(*args, **options)['result']
 
-        # connect to KRA
-        with self.api.Backend.kra.get_client() as kra_client:
-            kra_account = pki.account.AccountClient(kra_client.connection)
-            kra_account.login()
+        client_key_id = self.obj.get_key_id(vault['dn'])
 
-            client_key_id = self.obj.get_key_id(vault['dn'])
+        tempdb = certdb.NSSDatabase()
+        tempdb.create_db()
 
-            # find vault record in KRA
-            response = kra_client.keys.list_keys(
-                client_key_id,
-                pki.key.KeyClient.KEY_STATUS_ACTIVE)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            ra_agent_p12 = os.path.join(tmpdir, 'ra-agent.p12')
+            request_json = os.path.join(tmpdir, 'request.json')
 
-            if not len(response.key_infos):
+            # import RA cert and key into PKCS #12 file
+            cmd = [
+                'openssl',
+                'pkcs12',
+                '-export',
+                '-in', paths.RA_AGENT_PEM,
+                '-inkey', paths.RA_AGENT_KEY,
+                '-out', ra_agent_p12,
+                '-name', 'ra-agent',
+                '-passout', 'file:' + tempdb.pwd_file
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            subprocess.run(cmd, check=True)
+
+            # import PKCS #12 file into NSS database
+            cmd = [
+                'pki',
+                '-d', tempdb.secdir,
+                '-C', tempdb.pwd_file,
+                'pkcs12-import',
+                '--pkcs12-file', ra_agent_p12,
+                '--pkcs12-password-file', tempdb.pwd_file
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            subprocess.run(cmd, check=True)
+
+            # find active key by client key ID
+            cmd = [
+                'pki',
+                '-d', tempdb.secdir,
+                '-C', tempdb.pwd_file,
+                '-n', 'ra-agent',
+                '--ignore-cert-status', 'UNTRUSTED_ISSUER',
+                'kra-key-find',
+                '--clientKeyID', client_key_id,
+                '--status', 'active',
+                '--output-format', 'json'
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+            key_infos = json.loads(result.stdout.decode('utf-8'))
+
+            if not len(key_infos['entries']):
                 raise errors.NotFound(reason=_('No archived data.'))
 
-            key_info = response.key_infos[0]
+            key_info = key_infos['entries'][0]
+            key_url = key_info['keyURL']
+            p = key_url.rfind('/') + 1
+            key_id = key_url[p:]
 
-            # retrieve encrypted data from KRA
-            key = kra_client.keys.retrieve_key(
-                key_info.get_key_id(),
-                wrapped_session_key)
+            # create retrieval request
+            with self.api.Backend.kra.get_client() as kra_client:
+                wrap_name = kra_client.keys.wrap_name
+                encrypt_alg_oid = kra_client.keys.encrypt_alg_oid
 
-            kra_account.logout()
+            request = {
+                'Attributes': {
+                    'Attribute': [
+                        {
+                            'name': 'transWrappedSessionKey',
+                            'value': base64.b64encode(wrapped_session_key).decode('utf-8')
+                        },
+                        {
+                            'name': 'keyId',
+                            'value': key_id
+                        },
+                        {
+                            'name': 'payloadWrappingName',
+                            'value': wrap_name
+                        },
+                        {
+                            'name': 'payloadEncryptionOID',
+                            'value': encrypt_alg_oid
+                        }
+                    ]
+                },
+                'ClassName': 'com.netscape.certsrv.key.KeyRecoveryRequest'
+            }
+            print('REST Request: %s' % json.dumps(request))
+
+            with open(request_json, 'w') as f:
+                json.dump(request, f)
+
+            # submit retrieval request
+            cmd = [
+                'pki',
+                '-d', tempdb.secdir,
+                '-C', tempdb.pwd_file,
+                '-n', 'ra-agent',
+                '--ignore-cert-status', 'UNTRUSTED_ISSUER',
+                'kra-key-retrieve',
+                '--input-format', 'json',
+                '--input', request_json,
+                '--output-format', 'json',
+            ]
+            print('Command: %s' % ' '.join(cmd))
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
+
+            print('REST Response: %s' % result.stdout.decode('utf-8'))
+            key = json.loads(result.stdout.decode('utf-8'))
+
+        finally:
+            shutil.rmtree(tmpdir)
+            tempdb.close()
 
         response = {
             'value': args[-1],
             'result': {
-                'vault_data': key.encrypted_data,
-                'nonce': key.nonce_data,
+                'vault_data': base64.b64decode(key['wrappedPrivateData']),
+                'nonce': base64.b64decode(key['nonceData']),
             },
         }
+        print('Final Response: %s' % str(response))
 
         response['summary'] = self.msg_summary % response
 
