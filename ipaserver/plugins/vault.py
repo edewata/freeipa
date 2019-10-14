@@ -835,78 +835,22 @@ class vault_del(LDAPDelete):
     def post_callback(self, ldap, dn, *args, **options):
         assert isinstance(dn, DN)
 
-        client_key_id = self.obj.get_key_id(dn)
+        with self.api.Backend.kra.get_client() as kra_client:
+            kra_account = pki.account.AccountClient(kra_client.connection)
+            kra_account.login()
 
-        tempdb = certdb.NSSDatabase()
-        tempdb.create_db()
+            client_key_id = self.obj.get_key_id(dn)
 
-        tmpdir = tempfile.mkdtemp()
-        try:
-            ra_agent_p12 = os.path.join(tmpdir, 'ra-agent.p12')
+            # deactivate vault record in KRA
+            response = kra_client.keys.list_keys(
+                client_key_id, pki.key.KeyClient.KEY_STATUS_ACTIVE)
 
-            # import RA cert and key into PKCS #12 file
-            cmd = [
-                'openssl',
-                'pkcs12',
-                '-export',
-                '-in', paths.RA_AGENT_PEM,
-                '-inkey', paths.RA_AGENT_KEY,
-                '-out', ra_agent_p12,
-                '-name', 'ra-agent',
-                '-passout', 'file:' + tempdb.pwd_file
-            ]
-            print('Command: %s' % ' '.join(cmd))
-            subprocess.run(cmd, check=True)
+            for key_info in response.key_infos:
+                kra_client.keys.modify_key_status(
+                    key_info.get_key_id(),
+                    pki.key.KeyClient.KEY_STATUS_INACTIVE)
 
-            # import PKCS #12 file into NSS database
-            cmd = [
-                'pki',
-                '-d', tempdb.secdir,
-                '-C', tempdb.pwd_file,
-                'pkcs12-import',
-                '--pkcs12-file', ra_agent_p12,
-                '--pkcs12-password-file', tempdb.pwd_file
-            ]
-            print('Command: %s' % ' '.join(cmd))
-            subprocess.run(cmd, check=True)
-
-            # find active keys by client key ID
-            cmd = [
-                'pki',
-                '-d', tempdb.secdir,
-                '-C', tempdb.pwd_file,
-                '-n', 'ra-agent',
-                '--ignore-cert-status', 'UNTRUSTED_ISSUER',
-                'kra-key-find',
-                '--clientKeyID', client_key_id,
-                '--status', 'active',
-                '--output-format', 'json'
-            ]
-            print('Command: %s' % ' '.join(cmd))
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
-            key_infos = json.loads(result.stdout.decode('utf-8'))
-
-            for key_info in key_infos['entries']:
-                key_url = key_info['keyURL']
-                p = key_url.rfind('/') + 1
-                key_id = key_url[p:]
-
-                # deactivate vault record in KRA
-                cmd = [
-                    'pki',
-                    '-d', tempdb.secdir,
-                    '-C', tempdb.pwd_file,
-                    '-n', 'ra-agent',
-                    '--ignore-cert-status', 'UNTRUSTED_ISSUER',
-                    'kra-key-mod', key_id,
-                    '--status', 'inactive'
-                ]
-                print('Command: %s' % ' '.join(cmd))
-                subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
-
-        finally:
-            shutil.rmtree(tmpdir)
-            tempdb.close()
+            kra_account.logout()
 
         return True
 
