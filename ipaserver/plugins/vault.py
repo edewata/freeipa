@@ -1062,30 +1062,9 @@ class vaultconfig_show(Retrieve):
             raise errors.InvocationError(
                 format=_('KRA service is not enabled'))
 
-        tempdb = certdb.NSSDatabase()
-        tempdb.create_db()
-
-        try:
-            with tempfile.NamedTemporaryFile() as out_file:
-                # retrieve transport cert and store it into a file
-                cmd = [
-                    'pki',
-                    '-d', tempdb.secdir,
-                    '-C', tempdb.pwd_file,
-                    '--ignore-cert-status', 'UNTRUSTED_ISSUER',
-                    'kra-cert-transport-export',
-                    '--output-format', 'der',
-                    '--output-file', out_file.name,
-                ]
-                subprocess.run(cmd, stdout=subprocess.PIPE, check=True)
-
-                # load transport cert from file
-                with open(out_file.name, 'rb') as in_file:
-                    transport_cert = in_file.read()
-        finally:
-            tempdb.close()
-
-        config = {'transport_cert': transport_cert}
+        with self.api.Backend.kra.get_client() as kra_client:
+            transport_cert = kra_client.system_certs.get_transport_cert()
+            config = {'transport_cert': transport_cert.binary}
 
         self.api.Object.config.show_servroles_attributes(
             config, "KRA server", **options)
