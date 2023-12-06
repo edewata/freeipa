@@ -199,6 +199,13 @@ class DogtagInstance(service.Service):
         timeout = str(api.env.startup_timeout)
         spawn_env["PKISPAWN_STARTUP_TIMEOUT_SECONDS"] = timeout
 
+        args = ["pki-server", "create", "-v"]
+
+        try:
+            ipautil.run(args, nolog=nolog_list, env=spawn_env)
+        except ipautil.CalledProcessError as e:
+            self.handle_setup_error(e)
+
         args = [paths.PKISPAWN,
                 "-s", subsystem,
                 "-f", cfg_file,
