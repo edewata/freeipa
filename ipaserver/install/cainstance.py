@@ -37,6 +37,8 @@ import tempfile
 from configparser import RawConfigParser
 from packaging.version import parse as parse_version
 
+#import pki.server
+
 from ipalib import api
 from ipalib import x509
 from ipalib import errors
@@ -703,6 +705,23 @@ class CAInstance(DogtagInstance):
 
             self.backup_state('installed', True)
 
+            logger.info('## pki-server create')
+            ipautil.run(['pki-server', 'create', '-v'])
+
+            #instance = pki.server.PKIServerFactory.create('pki-tomcat')
+            #instance.create()
+
+            #subsystem = pki.server.subsystem.PKISubsystemFactory.create(instance, 'ca')
+            #instance.add_subsystem(subsystem)
+
+            logger.info('## pki-server ca-create')
+            ipautil.run(['pki-server', 'ca-create', '-v'])
+
+            #subsystem.create(exist_ok=True)
+            #subsystem.create_conf(exist_ok=True)
+            #subsystem.create_logs(exist_ok=True)
+
+            logger.info('## pkispawn')
             DogtagInstance.spawn_instance(
                 self, f.name,
                 nolog_list=nolog_list

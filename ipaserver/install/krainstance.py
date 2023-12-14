@@ -24,6 +24,8 @@ import os
 import shutil
 import tempfile
 
+#import pki.server
+
 from ipalib import api
 from ipalib import x509
 from ipalib.constants import KRA_TRACKING_REQS
@@ -242,6 +244,19 @@ class KRAInstance(DogtagInstance):
         ]
 
         try:
+            #instance = pki.server.PKIServerFactory.create('pki-tomcat')
+
+            #subsystem = pki.server.subsystem.PKISubsystemFactory.create(instance, 'kra')
+            #instance.add_subsystem(subsystem)
+
+            logger.info('## pki-server kra-create')
+            ipautil.run(['pki-server', 'kra-create', '-v'])
+
+            #subsystem.create(exist_ok=True)
+            #subsystem.create_conf(exist_ok=True)
+            #subsystem.create_logs(exist_ok=True)
+
+            #logger.info('## pkispawn')
             DogtagInstance.spawn_instance(
                 self, cfg_file,
                 nolog_list=nolog_list

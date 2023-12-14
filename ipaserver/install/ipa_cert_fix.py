@@ -378,12 +378,13 @@ def run_cert_fix(certs, extra_certs):
         'cert-fix',
         '--ldapi-socket', ldapi_path,
         '--agent-uid', 'ipara',
+        '--debug'
     ]
     for certid, _cert in certs:
         cmd.extend(['--cert', certid])
     for _certtype, cert in extra_certs:
         cmd.extend(['--extra-cert', str(cert.serial_number)])
-    ipautil.run(cmd, raiseonerr=True)
+    ipautil.run(cmd, raiseonerr=True, redirect_output=True)
 
 
 def replicate_dogtag_certs(subject_base, ca_subject_dn, certs):
